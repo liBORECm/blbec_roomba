@@ -3,3 +3,7 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+SW/include/secrets.h
+SW/.pio
+SW/.vscode
