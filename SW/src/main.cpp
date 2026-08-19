@@ -2,7 +2,7 @@
 #include <WebServer.h>
 #include "secrets.h" // WIFI_SSID a WIFI_PASSWORD
 
-// Pins for UART coom with Roomba
+// Pins for UART comm with Roomba
 // ESP32 TX -> LV1 -> HV1 -> Roomba pin 3 (RXD)
 // ESP32 RX <- LV2 <- HV2 <- Roomba pin 4 (TXD)
 #define ROOMBA_RX_PIN 16
@@ -24,8 +24,10 @@ WebServer server(80);
 
 unsigned long lastKeepAlive = 0;
 const unsigned long KEEPALIVE_INTERVAL = 1000;
+bool oiInitialized = false;
+String lastCommand = "unknown";
 
-// ---------- WAKE-UP SEKVENCE ----------
+// ---------- WAKE-UP SEQUENCE ----------
 void wakeRoomba() {
   pinMode(BRC_PIN, OUTPUT);
   digitalWrite(BRC_PIN, LOW);
@@ -37,10 +39,14 @@ void wakeRoomba() {
   delay(50);
   Serial2.write(OI_SAFE); // Safe mode
   delay(50);
+
+  oiInitialized = true;
+  lastCommand = "idle_awake";
 }
 
 // ---------- KEEPALIVE ----------
 void keepAlive() {
+  if (!oiInitialized) return; // nothing to keep alive yet
   // We send anythng to keep alive
   Serial2.write(OI_SENSORS);
   Serial2.write((byte)21);
@@ -85,6 +91,52 @@ int readBatteryPercent() {
   return (int)((charge * 100.0) / capacity);
 }
 
+// ---------- DOCK / CHARGING STATE (packet 21) ----------
+String getDockedStatus() {
+  Serial2.write(OI_SENSORS);
+  Serial2.write((byte)21);
+  delay(50);
+
+  if (Serial2.available() < 1) {
+    return "unknown";
+  }
+
+  int state = Serial2.read();
+
+  switch (state) {
+    case 0: return "not_docked";
+    case 1: return "docked_reconditioning";
+    case 2: return "docked_full_charging";
+    case 3: return "docked_trickle_charging";
+    case 4: return "docked_waiting";
+    case 5: return "docked_charging_fault";
+    default: return "unknown";
+  }
+}
+
+// ---------- OI MODE (packet 35) ----------
+// Tells us Off / Passive / Safe / Full - useful to confirm the ESP32
+// actually still has control, independent of the cleaning heuristic above.
+String getOiMode() {
+  Serial2.write(OI_SENSORS);
+  Serial2.write((byte)35);
+  delay(50);
+
+  if (Serial2.available() < 1) {
+    return "unknown";
+  }
+
+  int mode = Serial2.read();
+
+  switch (mode) {
+    case 0: return "off";
+    case 1: return "passive";
+    case 2: return "safe";
+    case 3: return "full";
+    default: return "unknown";
+  }
+}
+
 // ---------- WEB ENDPOINTS ----------
 void handleRoot() {
   String html = "<html><body style='font-family:sans-serif'>";
@@ -93,7 +145,7 @@ void handleRoot() {
   html += "<p><a href='/clean'><button>Spustit uklizeni</button></a></p>";
   html += "<p><a href='/dock'><button>Na nabijecku</button></a></p>";
   html += "<p><a href='/power'><button>Vypnout</button></a></p>";
-  html += "<p><a href='/status'><button>Stav baterky</button></a></p>";
+  html += "<p><a href='/status'><button>Stav (JSON)</button></a></p>";
   html += "</body></html>";
   server.send(200, "text/html", html);
 }
@@ -104,29 +156,47 @@ void handleStart() {
 }
 
 void handleClean() {
+  if (!oiInitialized) wakeRoomba(); // auto-init if nobody called /start yet
   Serial2.write(OI_CLEAN);
+  lastCommand = "cleaning";
   server.send(200, "text/plain", "Started cleaning");
 }
 
 void handleDock() {
+  if (!oiInitialized) wakeRoomba();
   Serial2.write(OI_DOCK);
+  lastCommand = "returning_to_dock";
   server.send(200, "text/plain", "Roomba is docking");
 }
 
 void handlePower() {
   Serial2.write(OI_POWER);
+  lastCommand = "off";
+  oiInitialized = false; // OI needs Start again after Power
   server.send(200, "text/plain", "Roomba is off (in passive state)");
 }
 
 void handleStatus() {
-  int battery = readBatteryPercent();
-  String response;
-  if (battery >= 0) {
-    response = "Batt: " + String(battery) + "%";
-  } else {
-    response = "Unable to read battery state (is roomba active? try /start)";
+  // Auto-init on first ever poll so /status works standalone too,
+  // but we do NOT call wakeRoomba()/Start on every subsequent poll -
+  // that would interrupt an active cleaning cycle.
+  if (!oiInitialized) {
+    wakeRoomba();
+    delay(200);
   }
-  server.send(200, "text/plain", response);
+
+  int battery = readBatteryPercent();
+  String docked = getDockedStatus();
+  String oiMode = getOiMode();
+
+  String response = "{";
+  response += "\"battery_percent\":" + (battery >= 0 ? String(battery) : String("null")) + ",";
+  response += "\"dock_state\":\"" + docked + "\",";
+  response += "\"oi_mode\":\"" + oiMode + "\",";
+  response += "\"last_command\":\"" + lastCommand + "\"";
+  response += "}";
+
+  server.send(200, "application/json", response);
 }
 
 // ---------- SETUP ----------
@@ -149,7 +219,7 @@ void setup() {
     Serial.print(".");
   }
   Serial.println("");
-  Serial.print("Connected! IP adresa: ");
+  Serial.print("Connected! IP address: ");
   Serial.println(WiFi.localIP());
 
   server.on("/", handleRoot);
