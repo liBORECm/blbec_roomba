@@ -137,6 +137,17 @@ String getOiMode() {
   }
 }
 
+// ---------- SEND OI COMMAND (with basic reliability workaround) ----------
+// Some commands occasionally seem to get dropped over the serial link
+// (likely noise on the protoboard/level shifter wiring or bad state management).
+// Sending twice is safe here because these OI commands are idempotent - repeating the
+// same instruction doesn't cause harmful side effects.
+void sendOI(byte opcode) {
+  Serial2.write(opcode);
+  delay(100);
+  Serial2.write(opcode);
+}
+
 // ---------- WEB ENDPOINTS ----------
 void handleRoot() {
   String html = "<html><body style='font-family:sans-serif'>";
@@ -157,23 +168,23 @@ void handleStart() {
 
 void handleClean() {
   if (!oiInitialized) wakeRoomba(); // auto-init if nobody called /start yet
-  Serial2.write(OI_CLEAN);
+  sendOI(OI_CLEAN);
   lastCommand = "cleaning";
   server.send(200, "text/plain", "Started cleaning");
 }
 
 void handleDock() {
   if (!oiInitialized) wakeRoomba();
-  Serial2.write(OI_DOCK);
+  sendOI(OI_DOCK);
   lastCommand = "returning_to_dock";
   server.send(200, "text/plain", "Roomba is docking");
 }
 
 void handlePower() {
-  Serial2.write(OI_POWER);
+  sendOI(OI_POWER);
   lastCommand = "off";
   oiInitialized = false; // OI needs Start again after Power
-  server.send(200, "text/plain", "Roomba is off (in passive state)");
+  server.send(200, "text/plain", "Roomba is off (passive/sleep state)");
 }
 
 void handleStatus() {
