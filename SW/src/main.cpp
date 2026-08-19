@@ -18,7 +18,14 @@
 #define OI_POWER   133
 #define OI_CLEAN   135
 #define OI_DOCK    143
+#define OI_DRIVE   137
 #define OI_SENSORS 142
+
+// Manual drive tuning - kept slow/conservative on purpose
+int driveSpeed = 150; // mm/s, adjustable at runtime via /drive/speed slider
+#define RADIUS_STRAIGHT  0x8000 // special value = drive straight
+#define RADIUS_CW        -1     // turn in place, clockwise
+#define RADIUS_CCW        1     // turn in place, counter-clockwise
 
 WebServer server(80);
 
@@ -26,6 +33,7 @@ unsigned long lastKeepAlive = 0;
 const unsigned long KEEPALIVE_INTERVAL = 1000;
 bool oiInitialized = false;
 String lastCommand = "unknown";
+String driveMode = "safe"; // "safe" or "full" - tracked locally, mirrors last mode we set
 
 // ---------- WAKE-UP SEQUENCE ----------
 void wakeRoomba() {
@@ -41,6 +49,7 @@ void wakeRoomba() {
   delay(50);
 
   oiInitialized = true;
+  driveMode = "safe";
   lastCommand = "idle_awake";
 }
 
@@ -148,15 +157,74 @@ void sendOI(byte opcode) {
   Serial2.write(opcode);
 }
 
+// ---------- DRIVE COMMAND ----------
+// velocity: mm/s, -500 to 500. radius: mm, -2000 to 2000, or special
+// values RADIUS_STRAIGHT (0x8000), RADIUS_CW (-1), RADIUS_CCW (1).
+void driveOI(int16_t velocity, int16_t radius) {
+  Serial2.write(OI_DRIVE);
+  Serial2.write((byte)((velocity >> 8) & 0xFF));
+  Serial2.write((byte)(velocity & 0xFF));
+  Serial2.write((byte)((radius >> 8) & 0xFF));
+  Serial2.write((byte)(radius & 0xFF));
+}
+
+void driveStop() {
+  driveOI(0, 0);
+}
+
 // ---------- WEB ENDPOINTS ----------
 void handleRoot() {
-  String html = "<html><body style='font-family:sans-serif'>";
+  String html = "<html><body style='font-family:sans-serif; text-align:center'>";
   html += "<h1>Roomba ovladac</h1>";
   html += "<p><a href='/start'><button>Start/Wake</button></a></p>";
   html += "<p><a href='/clean'><button>Spustit uklizeni</button></a></p>";
   html += "<p><a href='/dock'><button>Na nabijecku</button></a></p>";
   html += "<p><a href='/power'><button>Vypnout</button></a></p>";
   html += "<p><a href='/status'><button>Stav (JSON)</button></a></p>";
+
+  html += "<hr><h2>Manualni ovladani</h2>";
+  html += "<p>";
+  html += "<button onclick=\"setMode('safe')\">Safe mode</button> ";
+  html += "<button onclick=\"setMode('full')\">Full mode</button>";
+  html += "</p>";
+
+  html += "<div style='margin:10px'>";
+  html += "Rychlost: <span id='speedVal'>150</span> mm/s<br>";
+  html += "<input type='range' id='speedSlider' min='20' max='400' value='150' style='width:250px'>";
+  html += "</div>";
+
+  html += "<div style='display:inline-block'>";
+  html += "<div style='text-align:center'><button class='drivebtn' data-dir='forward'>&uarr;</button></div>";
+  html += "<div>";
+  html += "<button class='drivebtn' data-dir='left'>&larr;</button> ";
+  html += "<button class='drivebtn' data-dir='stop' style='background:#ddd'>STOP</button> ";
+  html += "<button class='drivebtn' data-dir='right'>&rarr;</button>";
+  html += "</div>";
+  html += "<div style='text-align:center'><button class='drivebtn' data-dir='backward'>&darr;</button></div>";
+  html += "</div>";
+
+  html += "<style>.drivebtn{font-size:24px;width:60px;height:60px;margin:4px}</style>";
+
+  html += "<script>";
+  html += "function setMode(m){fetch('/mode/'+m);}";
+  html += "function drive(dir){fetch('/drive/'+dir);}";
+  html += "var speedSlider = document.getElementById('speedSlider');";
+  html += "var speedVal = document.getElementById('speedVal');";
+  html += "speedSlider.addEventListener('input', function(){";
+  html += "  speedVal.textContent = speedSlider.value;";
+  html += "  fetch('/drive/speed?value=' + speedSlider.value);";
+  html += "});";
+  html += "document.querySelectorAll('.drivebtn').forEach(function(btn){";
+  html += "  var dir = btn.getAttribute('data-dir');";
+  html += "  if(dir === 'stop'){ btn.onclick = function(){drive('stop');}; return; }";
+  html += "  btn.addEventListener('mousedown', function(){drive(dir);});";
+  html += "  btn.addEventListener('touchstart', function(e){e.preventDefault();drive(dir);});";
+  html += "  btn.addEventListener('mouseup', function(){drive('stop');});";
+  html += "  btn.addEventListener('mouseleave', function(){drive('stop');});";
+  html += "  btn.addEventListener('touchend', function(e){e.preventDefault();drive('stop');});";
+  html += "});";
+  html += "</script>";
+
   html += "</body></html>";
   server.send(200, "text/html", html);
 }
@@ -187,6 +255,60 @@ void handlePower() {
   server.send(200, "text/plain", "Roomba is off (passive/sleep state)");
 }
 
+void handleModeSafe() {
+  if (!oiInitialized) wakeRoomba();
+  Serial2.write(OI_SAFE);
+  driveMode = "safe";
+  server.send(200, "text/plain", "Safe mode set");
+}
+
+void handleModeFull() {
+  if (!oiInitialized) wakeRoomba();
+  Serial2.write(OI_FULL);
+  driveMode = "full";
+  server.send(200, "text/plain", "Full mode set (safety cutoffs disabled - be careful near stairs/edges)");
+}
+
+void handleSetSpeed() {
+  if (server.hasArg("value")) {
+    int v = server.arg("value").toInt();
+    // Clamp to a sane, safe range - OI max is 500mm/s but that's too fast indoors
+    if (v < 20) v = 20;
+    if (v > 400) v = 400;
+    driveSpeed = v;
+  }
+  server.send(200, "text/plain", "Speed set to " + String(driveSpeed) + " mm/s");
+}
+
+void handleDriveForward() {
+  if (!oiInitialized) wakeRoomba();
+  driveOI(driveSpeed, RADIUS_STRAIGHT);
+  server.send(200, "text/plain", "Driving forward");
+}
+
+void handleDriveBackward() {
+  if (!oiInitialized) wakeRoomba();
+  driveOI(-driveSpeed, RADIUS_STRAIGHT);
+  server.send(200, "text/plain", "Driving backward");
+}
+
+void handleTurnLeft() {
+  if (!oiInitialized) wakeRoomba();
+  driveOI(driveSpeed, RADIUS_CCW);
+  server.send(200, "text/plain", "Turning left (in place)");
+}
+
+void handleTurnRight() {
+  if (!oiInitialized) wakeRoomba();
+  driveOI(driveSpeed, RADIUS_CW);
+  server.send(200, "text/plain", "Turning right (in place)");
+}
+
+void handleDriveStop() {
+  driveStop();
+  server.send(200, "text/plain", "Stopped");
+}
+
 void handleStatus() {
   // Auto-init on first ever poll so /status works standalone too,
   // but we do NOT call wakeRoomba()/Start on every subsequent poll -
@@ -204,6 +326,7 @@ void handleStatus() {
   response += "\"battery_percent\":" + (battery >= 0 ? String(battery) : String("null")) + ",";
   response += "\"dock_state\":\"" + docked + "\",";
   response += "\"oi_mode\":\"" + oiMode + "\",";
+  response += "\"drive_mode\":\"" + driveMode + "\",";
   response += "\"last_command\":\"" + lastCommand + "\"";
   response += "}";
 
@@ -239,6 +362,14 @@ void setup() {
   server.on("/dock", handleDock);
   server.on("/power", handlePower);
   server.on("/status", handleStatus);
+  server.on("/mode/safe", handleModeSafe);
+  server.on("/mode/full", handleModeFull);
+  server.on("/drive/forward", handleDriveForward);
+  server.on("/drive/backward", handleDriveBackward);
+  server.on("/drive/left", handleTurnLeft);
+  server.on("/drive/right", handleTurnRight);
+  server.on("/drive/stop", handleDriveStop);
+  server.on("/drive/speed", handleSetSpeed);
   server.begin();
 
   Serial.println("Web server is on.");
