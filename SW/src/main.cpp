@@ -144,7 +144,7 @@ String getOiMode() {
 // same instruction doesn't cause harmful side effects.
 void sendOI(byte opcode) {
   Serial2.write(opcode);
-  delay(100);
+  delay(1000);
   Serial2.write(opcode);
 }
 
