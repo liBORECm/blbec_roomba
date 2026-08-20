@@ -1,0 +1,36 @@
+# Copy this in your HA dashboard
+
+type: entities
+title: Roomba
+entities:
+  - type: button
+    name: Start cleaning
+    icon: mdi:robot-vacuum
+    tap_action:
+      action: perform-action
+      perform_action: rest_command.roomba_clean
+  - type: button
+    name: Dock
+    icon: mdi:home-import-outline
+    tap_action:
+      action: perform-action
+      perform_action: rest_command.roomba_dock
+  - entity: sensor.roomba_battery
+    name: Battery
+    icon: mdi:battery
+  - type: attribute
+    entity: sensor.roomba_battery
+    attribute: dock_state
+    name: Dock state
+    icon: mdi:lightning-bolt
+  - type: attribute
+    entity: sensor.roomba_battery
+    attribute: last_command
+    name: Last command
+    icon: mdi:code-json
+  - type: button
+    name: Connect
+    icon: mdi:open-in-new
+    tap_action:
+      action: url
+      url_path: http://192.168.0.200/
