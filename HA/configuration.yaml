@@ -1,0 +1,22 @@
+# Copy this into your configuration.yaml (see https://www.home-assistant.io/docs/configuration/)
+# Dont forget to check you config (settings -> tools -> yaml -> check config)
+#   and restart (settings -> tools -> yaml -> Restart)
+
+rest_command:
+  roomba_clean:
+    url: "http://192.168.0.200/clean"
+  roomba_dock:
+    url: "http://192.168.0.200/dock"
+
+sensor:
+  - platform: rest
+    name: "Roomba battery"
+    resource: "http://192.168.0.200/status"
+    value_template: "{{ value_json.battery_percent }}"
+    unit_of_measurement: "%"
+    json_attributes:
+      - dock_state
+      - oi_mode
+      - drive_mode
+      - last_command
+    scan_interval: 60
